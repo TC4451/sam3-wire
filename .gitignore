@@ -151,3 +151,10 @@ Thumbs.db
 # BPE vocabulary files
 *.bpe
 *.vocab
+
+**/.DS_Store
+**/*:Zone.Identifier
+**/*.Zone.Identifier
+**/*Zone.Identifier*
+
+**/coco_predictions_segm.json
