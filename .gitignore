@@ -153,3 +153,8 @@ Thumbs.db
 *.vocab
 
 **/.DS_Store
+**/*:Zone.Identifier
+**/*.Zone.Identifier
+**/*Zone.Identifier*
+
+**/coco_predictions_segm.json
