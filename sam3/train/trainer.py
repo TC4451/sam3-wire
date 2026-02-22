@@ -12,6 +12,7 @@ import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pprint import pformat
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -209,9 +210,10 @@ class Trainer:
         set_seeds(seed_value, self.max_epochs, self.distributed_rank)
         log_env_variables()
 
-        assert is_dist_avail_and_initialized(), (
-            "Torch distributed needs to be initialized before calling the trainer."
-        )
+        if not is_dist_avail_and_initialized():
+            print(
+                "WARNING: Torch distributed is not initialized; running in single-process mode."
+            )
 
         self._setup_components()  # Except Optimizer everything is setup here.
         self._move_to_device()
@@ -282,9 +284,20 @@ class Trainer:
                 else cuda_conf.allow_tf32
             )
 
-        self.rank = setup_distributed_backend(
-            distributed_conf.backend, distributed_conf.timeout_mins
-        )
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        try:
+            self.rank = setup_distributed_backend(
+                distributed_conf.backend, distributed_conf.timeout_mins
+            )
+        except Exception as e:
+            if world_size != 1:
+                raise
+            # Allow single-process runs in restricted environments where
+            # process-group setup (TCP/GLOO/NCCL) is unavailable.
+            self.rank = 0
+            logging.warning(
+                "Falling back to non-distributed single-process mode: %s", str(e)
+            )
 
     def _setup_device(self, accelerator):
         self.local_rank, self.distributed_rank = get_machine_local_and_dist_rank()
@@ -298,6 +311,9 @@ class Trainer:
 
     def _setup_ddp_distributed_training(self, distributed_conf, accelerator):
         assert isinstance(self.model, torch.nn.Module)
+
+        if not is_dist_avail_and_initialized() or dist.get_world_size() <= 1:
+            return
 
         self.model = nn.parallel.DistributedDataParallel(
             self.model,
@@ -729,7 +745,7 @@ class Trainer:
                     )
 
             if data_iter % 10 == 0:
-                dist.barrier()
+                barrier()
 
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
         self._log_timers(phase)
@@ -747,7 +763,7 @@ class Trainer:
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
         self._reset_meters(curr_phases)
-        logging.info(f"Meters: {out_dict}")
+        logging.info("Meters:\n%s", pformat(out_dict, sort_dicts=False))
         return out_dict
 
     def _get_trainer_state(self, phase):
@@ -883,7 +899,7 @@ class Trainer:
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
         out_dict.update(self._get_trainer_state(phase))
-        logging.info(f"Losses and meters: {out_dict}")
+        logging.info("Losses and meters:\n%s", pformat(out_dict, sort_dicts=False))
         self._reset_meters([phase])
         return out_dict
 

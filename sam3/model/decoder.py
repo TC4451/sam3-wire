@@ -274,8 +274,9 @@ class TransformerDecoder(nn.Module):
 
             if resolution is not None and stride is not None:
                 feat_size = resolution // stride
+                precompute_device = "cuda" if torch.cuda.is_available() else "cpu"
                 coords_h, coords_w = self._get_coords(
-                    feat_size, feat_size, device="cuda"
+                    feat_size, feat_size, device=precompute_device
                 )
                 self.compilable_cord_cache = (coords_h, coords_w)
                 self.compilable_stored_size = (feat_size, feat_size)
@@ -329,7 +330,15 @@ class TransformerDecoder(nn.Module):
         H, W = feat_size
         boxes_xyxy = box_cxcywh_to_xyxy(reference_boxes).transpose(0, 1)
         bs, num_queries, _ = boxes_xyxy.shape
-        if self.compilable_cord_cache is None:
+        cache_device = (
+            self.compilable_cord_cache[0].device
+            if self.compilable_cord_cache is not None
+            else None
+        )
+        if (
+            self.compilable_cord_cache is None
+            or cache_device != reference_boxes.device
+        ):
             self.compilable_cord_cache = self._get_coords(H, W, reference_boxes.device)
             self.compilable_stored_size = (H, W)
 
@@ -342,11 +351,12 @@ class TransformerDecoder(nn.Module):
         else:
             # cache miss, will create compilation issue
             # In case we're not compiling, we'll still rely on the dict-based cache
-            if feat_size not in self.coord_cache:
-                self.coord_cache[feat_size] = self._get_coords(
+            coord_cache_key = (feat_size, str(reference_boxes.device))
+            if coord_cache_key not in self.coord_cache:
+                self.coord_cache[coord_cache_key] = self._get_coords(
                     H, W, reference_boxes.device
                 )
-            coords_h, coords_w = self.coord_cache[feat_size]
+            coords_h, coords_w = self.coord_cache[coord_cache_key]
 
             assert coords_h.shape == (H,)
             assert coords_w.shape == (W,)

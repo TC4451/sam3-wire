@@ -72,7 +72,26 @@ def setup_distributed_backend(backend, timeout_mins):
     # of waiting
     os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
     logging.info(f"Setting up torch.distributed with a timeout of {timeout_mins} mins")
-    dist.init_process_group(backend=backend, timeout=timedelta(minutes=timeout_mins))
+
+    # In constrained environments, env:// rendezvous may fail to bind a TCP socket
+    # even for single-process runs. For WORLD_SIZE=1, fall back to file:// init.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1:
+        rank = int(os.environ.get("RANK", "0"))
+        file_path = os.path.join(
+            "/tmp", f"sam3_dist_init_{os.getpid()}_{rank}.tmp"
+        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        dist.init_process_group(
+            backend=backend,
+            timeout=timedelta(minutes=timeout_mins),
+            init_method=f"file://{file_path}",
+            rank=rank,
+            world_size=world_size,
+        )
+    else:
+        dist.init_process_group(backend=backend, timeout=timedelta(minutes=timeout_mins))
     return dist.get_rank()
 
 

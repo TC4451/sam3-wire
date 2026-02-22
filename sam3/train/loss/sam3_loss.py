@@ -20,7 +20,10 @@ class DummyLoss(torch.nn.Module):
     ):
         super().__init__()
         self.core_loss_key = core_loss_key
-        self.device = torch.device(device)
+        resolved_device = torch.device(device)
+        if resolved_device.type == "cuda" and not torch.cuda.is_available():
+            resolved_device = torch.device("cpu")
+        self.device = resolved_device
 
     def forward(self, *args, **kwargs):
         return {self.core_loss_key: torch.tensor(0.0, device=self.device)}

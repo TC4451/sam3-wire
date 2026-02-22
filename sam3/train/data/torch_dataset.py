@@ -4,6 +4,7 @@
 
 from typing import Callable, Iterable, Optional
 
+import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 
 
@@ -29,7 +30,14 @@ class TorchDataset:
         self.collate_fn = collate_fn
         self.worker_init_fn = worker_init_fn
         assert not isinstance(self.dataset, IterableDataset), "Not supported yet"
-        if enable_distributed_sampler:
+
+        use_distributed_sampler = (
+            enable_distributed_sampler
+            and dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+        )
+        if use_distributed_sampler:
             self.sampler = DistributedSampler(self.dataset, shuffle=self.shuffle)
         else:
             self.sampler = None
@@ -49,6 +57,7 @@ class TorchDataset:
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
             sampler=self.sampler,
+            shuffle=(self.shuffle and self.sampler is None),
             collate_fn=self.collate_fn,
             worker_init_fn=self.worker_init_fn,
         )
