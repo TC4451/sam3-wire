@@ -158,3 +158,6 @@ Thumbs.db
 **/*Zone.Identifier*
 
 **/coco_predictions_segm.json
+
+img/**/*.png
+img/**/*.json

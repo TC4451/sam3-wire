@@ -17,6 +17,29 @@ def _do_matching(cost, repeats=1, return_tgt_indices=False, do_filtering=False):
     if repeats > 1:
         cost = np.tile(cost, (1, repeats))
 
+
+    # ---- NEW: guard ----
+    if not np.isfinite(cost).all():
+        import os
+        import time
+        os.makedirs("/tmp/sam3_bad_match", exist_ok=True)
+        path = f"/tmp/sam3_bad_match/cost_{int(time.time())}_shape{cost.shape}.npz"
+        np.savez_compressed(
+            path,
+            cost=cost,
+            nonfinite=np.sum(~np.isfinite(cost)),
+            min_finite=np.nanmin(cost),
+            max_finite=np.nanmax(cost),
+        )
+        print(f"[matcher] Non-finite cost matrix detected. Dumped to {path}")
+
+        # Replace NaN/Inf with very high cost so Hungarian can run.
+        cost = np.nan_to_num(cost, nan=1e9, posinf=1e9, neginf=1e9)
+
+        # Force filtering so 1e9 matches get dropped.
+        do_filtering = True
+    # --------------------
+
     i, j = linear_sum_assignment(cost)
     if do_filtering:
         # filter out invalid entries (i.e. those with cost > 1e8)
@@ -537,6 +560,46 @@ class BinaryHungarianMatcherV2(nn.Module):
 
         device = out_score.device
 
+
+        import os, time
+
+        def _rank0_print(msg: str):
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                if torch.distributed.get_rank() != 0:
+                    return
+            print(msg)
+
+        def _finite_report(name: str, t: torch.Tensor):
+            if t is None:
+                return True
+            ok = torch.isfinite(t).all().item()
+            if ok:
+                return True
+            n_nan = torch.isnan(t).sum().item()
+            n_inf = torch.isinf(t).sum().item()
+            # min/max over finite entries only
+            finite = t[torch.isfinite(t)]
+            mn = finite.min().item() if finite.numel() else float("nan")
+            mx = finite.max().item() if finite.numel() else float("nan")
+            _rank0_print(f"[matcher] NON-FINITE {name}: nan={n_nan} inf={n_inf} finite_min={mn} finite_max={mx} shape={tuple(t.shape)}")
+            return False
+
+        def _dump(tag: str, **tensors):
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                if torch.distributed.get_rank() != 0:
+                    return
+            os.makedirs("/tmp/sam3_bad_match", exist_ok=True)
+            path = f"/tmp/sam3_bad_match/{tag}_{int(time.time())}.pt"
+            payload = {}
+            for k, v in tensors.items():
+                if torch.is_tensor(v):
+                    payload[k] = v.detach().cpu()
+                else:
+                    payload[k] = v
+            torch.save(payload, path)
+            print(f"[matcher] dumped -> {path}")
+
+
         num_boxes = batched_targets["num_boxes"].cpu()
         # Get a padded version of target boxes (as precomputed in the collator).
         # It should work for both repeat==1 (o2o) and repeat>1 (o2m) matching.
@@ -568,13 +631,50 @@ class BinaryHungarianMatcherV2(nn.Module):
         assert out_bbox.shape[0] == tgt_bbox.shape[0]
         assert out_bbox.shape[0] == num_boxes.shape[0]
 
+
+        # ---- DEBUG: inputs to costs ----
+        bad = False
+        bad |= (not _finite_report("out_score", out_score))
+        bad |= (not _finite_report("out_bbox", out_bbox))
+        bad |= (not _finite_report("tgt_bbox", tgt_bbox))
+
+        # also catch degenerate widths/heights early (cxcywh => wh are last 2)
+        eps = 1e-8
+        if out_bbox.numel() and (out_bbox[..., 2:4] <= eps).any().item():
+            _rank0_print("[matcher] degenerate out_bbox wh detected (<=eps)")
+            bad = True
+        if tgt_bbox.numel() and (tgt_bbox[..., 2:4] <= eps).any().item():
+            _rank0_print("[matcher] degenerate tgt_bbox wh detected (<=eps)")
+            bad = True
+
+        if bad:
+            _dump("bad_inputs",
+                out_score=out_score, out_bbox=out_bbox, tgt_bbox=tgt_bbox,
+                num_boxes=num_boxes,
+                out_is_valid=out_is_valid, target_is_valid_padded=target_is_valid_padded)
+            # optionally raise to stop immediately:
+            # raise RuntimeError("matcher inputs non-finite / degenerate")
+        # --------------------------------
+
+
+
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+
+        if not _finite_report("cost_bbox", cost_bbox):
+            _dump("bad_cost_bbox", cost_bbox=cost_bbox, out_bbox=out_bbox, tgt_bbox=tgt_bbox, num_boxes=num_boxes)
+            # raise RuntimeError("non-finite cost_bbox")
 
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(
             box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox)
         )
+
+
+        if not _finite_report("cost_giou", cost_giou):
+            _dump("bad_cost_giou", cost_giou=cost_giou, out_bbox=out_bbox, tgt_bbox=tgt_bbox, num_boxes=num_boxes)
+            # raise RuntimeError("non-finite cost_giou")
+
 
         out_prob = self.norm(out_score)
         if not self.focal:
@@ -599,6 +699,12 @@ class BinaryHungarianMatcherV2(nn.Module):
 
         assert cost_class.shape == cost_bbox.shape
 
+        if not _finite_report("cost_class", cost_class):
+            _dump("bad_cost_class",
+                cost_class=cost_class, out_score=out_score,
+                out_prob=out_prob, num_boxes=num_boxes)
+            # raise RuntimeError("non-finite cost_class")
+
         # Final cost matrix
         C = (
             self.cost_bbox * cost_bbox
@@ -612,6 +718,15 @@ class BinaryHungarianMatcherV2(nn.Module):
             C = torch.where(out_is_valid[:, :, None], C, 1e9)
         if target_is_valid_padded is not None:
             C = torch.where(target_is_valid_padded[:, None, :], C, 1e9)
+
+        if not _finite_report("C_total", C):
+            _dump("bad_C_total", C=C, cost_bbox=cost_bbox, cost_giou=cost_giou, cost_class=cost_class,
+                out_score=out_score, out_bbox=out_bbox, tgt_bbox=tgt_bbox, num_boxes=num_boxes,
+                out_is_valid=out_is_valid, target_is_valid_padded=target_is_valid_padded)
+            # Optional “keep training alive”:
+            C = torch.nan_to_num(C, nan=1e9, posinf=1e9, neginf=1e9)
+
+
         C = C.cpu().numpy()
         costs = [C[i, :, :s] for i, s in enumerate(num_boxes.tolist())]
         return_tgt_indices = (

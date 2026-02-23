@@ -1,0 +1,58 @@
+# @package _global_
+defaults:
+  - /configs/eval_base.yaml
+  - _self_
+
+paths:
+  checkpoint_path: /home/daizi/sam3/outputs/small_organized_quick_ft/sam3_sanitized_init.pt
+  bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  experiment_log_dir: /home/daizi/sam3/outputs/small_organized_gpu_smoke
+  coco_gt: /home/daizi/sam3/img/small_organized/coco/annotations.json
+  img_path: /home/daizi/sam3/img/small_organized/rgb
+
+trainer:
+  mode: val
+  accelerator: cuda
+  distributed:
+    backend: nccl
+  optim:
+    amp:
+      enabled: false
+  model:
+    eval_mode: true
+    enable_segmentation: true
+    load_from_HF: false
+  data:
+    val:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          include_negatives: true
+          category_chunk_size: 8
+          _partial_: true
+        img_folder: ${paths.img_path}
+        ann_file: ${paths.coco_gt}
+        transforms: ${scratch.base_val_transform}
+        max_ann_per_img: 200
+        multiplier: 1
+        training: false
+      shuffle: false
+      batch_size: 1
+      num_workers: 8
+      pin_memory: false
+      drop_last: false
+      collate_fn:
+        _target_: sam3.train.data.collator.collate_fn_api
+        _partial_: true
+        repeats: ${scratch.hybrid_repeats}
+        dict_key: all
+  meters: null
+
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1
+
+submitit:
+  use_cluster: false

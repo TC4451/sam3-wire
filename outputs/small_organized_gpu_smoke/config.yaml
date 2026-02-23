@@ -1,0 +1,232 @@
+paths:
+  checkpoint_path: /home/daizi/sam3/outputs/small_organized_quick_ft/sam3_sanitized_init.pt
+  base_experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
+  base_annotation_path: <YOUR_GOLD_GT_DIR>
+  base_annotation_path_silver: <YOUR_SILVER_GT_DIR>
+  metaclip_img_path: <YOUR_METACLIP_IMG_DIR>
+  sa1b_img_path: <YOUR_SA1B_IMG_DIR>
+  silver_img_path: <YOUR_SILVER_IMG_DIR>
+  bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  experiment_log_dir: /home/daizi/sam3/outputs/small_organized_gpu_smoke
+  coco_gt: /home/daizi/sam3/img/small_organized/coco/annotations.json
+  img_path: /home/daizi/sam3/img/small_organized/rgb
+scratch:
+  use_presence_eval: true
+  base_val_transform:
+  - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+    transforms:
+    - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+      sizes: ${scratch.resolution}
+      max_size:
+        _target_: sam3.train.transforms.basic.get_random_resize_max_size
+        size: ${scratch.resolution}
+      square: true
+      consistent_transform: false
+    - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+    - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+      mean: ${scratch.val_norm_mean}
+      std: ${scratch.val_norm_std}
+  loss: null
+  d_model: 256
+  input_box_embedding_dim: ${add:${scratch.d_model},2}
+  original_box_postprocessor:
+    _target_: sam3.eval.postprocessors.PostProcessImage
+    max_dets_per_img: -1
+    use_original_ids: true
+    use_original_sizes_box: true
+    use_presence: ${scratch.use_presence_eval}
+  box_postprocessor:
+    _target_: sam3.eval.postprocessors.PostProcessImage
+    max_dets_per_img: -1
+    use_original_ids: false
+    use_original_sizes_box: false
+    use_presence: ${scratch.use_presence_eval}
+  box_postprocessor_thresholded:
+    _target_: sam3.eval.postprocessors.PostProcessImage
+    max_dets_per_img: -1
+    use_original_ids: false
+    use_original_sizes_box: false
+    detection_threshold: 0.3
+    use_presence: ${scratch.use_presence_eval}
+  mask_postprocessor_thresholded:
+    _target_: sam3.eval.postprocessors.PostProcessImage
+    max_dets_per_img: -1
+    iou_type: segm
+    use_original_ids: false
+    use_original_sizes_box: false
+    use_original_sizes_mask: true
+    convert_mask_to_rle: true
+    detection_threshold: 0.3
+    use_presence: ${scratch.use_presence_eval}
+  resolution: 1008
+  max_ann_per_img: 200
+  train_norm_mean:
+  - 0.5
+  - 0.5
+  - 0.5
+  train_norm_std:
+  - 0.5
+  - 0.5
+  - 0.5
+  val_norm_mean:
+  - 0.5
+  - 0.5
+  - 0.5
+  val_norm_std:
+  - 0.5
+  - 0.5
+  - 0.5
+  train_batch_size: 1
+  val_batch_size: 1
+  num_train_workers: 0
+  num_val_workers: 10
+  max_data_epochs: 20
+  target_epoch_size: 1500
+  hybrid_repeats: 1
+  context_length: 2
+  gather_pred_via_filesys: false
+  lr_scale: 0.1
+  lr_transformer: ${times:8e-4,${scratch.lr_scale}}
+  lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
+  lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
+  lrd_vision_backbone: 0.9
+  wd: 0.1
+  scheduler_timescale: 20
+  scheduler_warmup: 20
+  scheduler_cooldown: 20
+trainer:
+  _target_: sam3.train.trainer.Trainer
+  skip_saving_ckpts: true
+  empty_gpu_mem_cache_after_eval: true
+  skip_first_val: true
+  max_epochs: ${scratch.max_data_epochs}
+  accelerator: cuda
+  seed_value: 123
+  val_epoch_freq: 10
+  mode: val
+  distributed:
+    backend: nccl
+    find_unused_parameters: true
+    gradient_as_bucket_view: true
+  loss:
+    all:
+      _target_: sam3.train.loss.sam3_loss.DummyLoss
+    default:
+      _target_: sam3.train.loss.sam3_loss.DummyLoss
+  data:
+    train: null
+    val:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          include_negatives: true
+          category_chunk_size: 8
+          _partial_: true
+        img_folder: ${paths.img_path}
+        ann_file: ${paths.coco_gt}
+        transforms: ${scratch.base_val_transform}
+        max_ann_per_img: 200
+        multiplier: 1
+        training: false
+      shuffle: false
+      batch_size: 1
+      num_workers: 8
+      pin_memory: false
+      drop_last: false
+      collate_fn:
+        _target_: sam3.train.data.collator.collate_fn_api
+        _partial_: true
+        repeats: ${scratch.hybrid_repeats}
+        dict_key: all
+  model:
+    _target_: sam3.model_builder.build_sam3_image_model
+    bpe_path: ${paths.bpe_path}
+    device: cpus
+    eval_mode: true
+    enable_segmentation: true
+    checkpoint_path: ${paths.checkpoint_path}
+    load_from_HF: false
+  meters: null
+  optim:
+    amp:
+      enabled: false
+      amp_dtype: bfloat16
+    optimizer:
+      _target_: torch.optim.AdamW
+    gradient_clip:
+      _target_: sam3.train.optim.optimizer.GradientClipper
+      max_norm: 0.1
+      norm_type: 2
+    param_group_modifiers:
+    - _target_: sam3.train.optim.optimizer.layer_decay_param_modifier
+      _partial_: true
+      layer_decay_value: ${scratch.lrd_vision_backbone}
+      apply_to: backbone.vision_backbone.trunk
+      overrides:
+      - pattern: '*pos_embed*'
+        value: 1.0
+    options:
+      lr:
+      - scheduler:
+          _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+          base_lr: ${scratch.lr_transformer}
+          timescale: ${scratch.scheduler_timescale}
+          warmup_steps: ${scratch.scheduler_warmup}
+          cooldown_steps: ${scratch.scheduler_cooldown}
+      - scheduler:
+          _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+          base_lr: ${scratch.lr_vision_backbone}
+          timescale: ${scratch.scheduler_timescale}
+          warmup_steps: ${scratch.scheduler_warmup}
+          cooldown_steps: ${scratch.scheduler_cooldown}
+        param_names:
+        - backbone.vision_backbone.*
+      - scheduler:
+          _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+          base_lr: ${scratch.lr_language_backbone}
+          timescale: ${scratch.scheduler_timescale}
+          warmup_steps: ${scratch.scheduler_warmup}
+          cooldown_steps: ${scratch.scheduler_cooldown}
+        param_names:
+        - backbone.language_backbone.*
+      weight_decay:
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: ${scratch.wd}
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: 0.0
+        param_names:
+        - '*bias*'
+        module_cls_names:
+        - torch.nn.LayerNorm
+  checkpoint:
+    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_freq: 0
+  logging:
+    tensorboard_writer:
+      _target_: sam3.train.utils.logger.make_tensorboard_logger
+      log_dir: ${launcher.experiment_log_dir}/tensorboard
+      flush_secs: 120
+      should_log: true
+    wandb_writer: null
+    log_dir: ${launcher.experiment_log_dir}/logs/
+    log_freq: 10
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1
+  experiment_log_dir: ${paths.experiment_log_dir}
+  multiprocessing_context: forkserver
+submitit:
+  account: null
+  partition: null
+  qos: null
+  timeout_hour: 72
+  use_cluster: false
+  cpus_per_task: 10
+  port_range:
+  - 10000
+  - 65000
+  constraint: null
