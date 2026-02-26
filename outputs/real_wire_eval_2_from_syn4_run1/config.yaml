@@ -1,5 +1,5 @@
 paths:
-  checkpoint_path: null
+  checkpoint_path: /home/daizi/sam3/outputs/synthetic_wire_finetune_4/checkpoints/checkpoint_for_eval_detector.pt
   base_experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
   base_annotation_path: <YOUR_GOLD_GT_DIR>
   base_annotation_path_silver: <YOUR_SILVER_GT_DIR>
@@ -7,9 +7,9 @@ paths:
   sa1b_img_path: <YOUR_SA1B_IMG_DIR>
   silver_img_path: <YOUR_SILVER_IMG_DIR>
   bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-  experiment_log_dir: /home/daizi/sam3/outputs/small_organized_eval
-  coco_gt: /home/daizi/sam3/img/small_organized/coco/annotations.json
-  img_path: /home/daizi/sam3/img/small_organized/rgb
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1
+  coco_gt: /home/daizi/data/real_wire/coco_all.json
+  img_path: /home/daizi/data/real_wire
 scratch:
   use_presence_eval: false
   base_val_transform:
@@ -101,12 +101,12 @@ trainer:
   empty_gpu_mem_cache_after_eval: true
   skip_first_val: true
   max_epochs: ${scratch.max_data_epochs}
-  accelerator: cpu
+  accelerator: cuda
   seed_value: 123
   val_epoch_freq: 10
   mode: val
   distributed:
-    backend: gloo
+    backend: nccl
     find_unused_parameters: true
     gradient_as_bucket_view: true
   loss:
@@ -140,7 +140,7 @@ trainer:
         _target_: sam3.train.data.collator.collate_fn_api
         _partial_: true
         repeats: ${scratch.hybrid_repeats}
-        dict_key: small_coco
+        dict_key: real_wire
   model:
     _target_: sam3.model_builder.build_sam3_image_model
     bpe_path: ${paths.bpe_path}
@@ -150,26 +150,21 @@ trainer:
     checkpoint_path: ${paths.checkpoint_path}
   meters:
     val:
-      small_coco:
-        bbox:
-          _target_: sam3.eval.coco_writer.PredictionDumper
-          iou_type: bbox
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
-          merge_predictions: true
-          postprocessor: ${scratch.original_box_postprocessor}
-          maxdets: 100
-          pred_file_evaluators:
-          - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-            gt_path: ${paths.coco_gt}
-            tide: false
-            iou_type: bbox
+      real_wire:
         segm:
-          _target_: sam3.eval.coco_writer.PredictionDumper
+          _target_: sam3.eval.streaming_coco_writer.StreamingPredictionDumper
           iou_type: segm
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
+          dump_dir: ${launcher.experiment_log_dir}/dumps/real_wire
           merge_predictions: true
           postprocessor: ${scratch.mask_postprocessor_thresholded}
           maxdets: 100
+          stream_gt_path: ${paths.coco_gt}
+          stream_eval_threshold: 0.5
+          stream_eval_every_n_updates: 25
+          stream_eval_min_images: 32
+          stream_eval_compute_coco: true
+          stream_eval_compute_demo: true
+          stream_global_gather: false
           pred_file_evaluators:
           - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
             gt_path: ${paths.coco_gt}
@@ -198,13 +193,15 @@ trainer:
             - 0.003
             - 0.004
             - 0.005
-            num_workers: null
-            chunk_size: 8
-            output_json: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.json
-            output_csv: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.csv
+            num_workers: 36
+            chunk_size: 1
+            multiprocessing_context: fork
+            torch_num_threads_per_worker: 1
+            output_json: ${launcher.experiment_log_dir}/dumps/real_wire/per_image_metrics_segm.json
+            output_csv: ${launcher.experiment_log_dir}/dumps/real_wire/per_image_metrics_segm.csv
   optim:
     amp:
-      enabled: false
+      enabled: true
       amp_dtype: bfloat16
     optimizer:
       _target_: torch.optim.AdamW
@@ -266,11 +263,12 @@ trainer:
       should_log: true
     wandb_writer: null
     log_dir: ${launcher.experiment_log_dir}/logs/
-    log_freq: 10
+    log_freq: 5
+    log_scalar_frequency: 20
 launcher:
   num_nodes: 1
   gpus_per_node: 1
-  experiment_log_dir: ${paths.experiment_log_dir}
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1
   multiprocessing_context: forkserver
 submitit:
   account: null

@@ -1,5 +1,5 @@
 paths:
-  checkpoint_path: null
+  checkpoint_path: /home/daizi/sam3/outputs/synthetic_wire_finetune_4/checkpoints/checkpoint_for_eval_detector.pt
   base_experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
   base_annotation_path: <YOUR_GOLD_GT_DIR>
   base_annotation_path_silver: <YOUR_SILVER_GT_DIR>
@@ -7,47 +7,53 @@ paths:
   sa1b_img_path: <YOUR_SA1B_IMG_DIR>
   silver_img_path: <YOUR_SILVER_IMG_DIR>
   bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-  experiment_log_dir: /home/daizi/sam3/outputs/small_organized_eval
-  coco_gt: /home/daizi/sam3/img/small_organized/coco/annotations.json
-  img_path: /home/daizi/sam3/img/small_organized/rgb
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1
+  coco_gt: /home/daizi/data/real_wire/coco_all.json
+  img_path: /home/daizi/data/real_wire
 scratch:
   use_presence_eval: false
   base_val_transform:
   - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
     transforms:
     - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
-      sizes: ${scratch.resolution}
+      sizes: 1008
       max_size:
         _target_: sam3.train.transforms.basic.get_random_resize_max_size
-        size: ${scratch.resolution}
+        size: 1008
       square: true
       consistent_transform: false
     - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
     - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
-      mean: ${scratch.val_norm_mean}
-      std: ${scratch.val_norm_std}
+      mean:
+      - 0.5
+      - 0.5
+      - 0.5
+      std:
+      - 0.5
+      - 0.5
+      - 0.5
   loss: null
   d_model: 256
-  input_box_embedding_dim: ${add:${scratch.d_model},2}
+  input_box_embedding_dim: 258
   original_box_postprocessor:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
     use_original_ids: true
     use_original_sizes_box: true
-    use_presence: ${scratch.use_presence_eval}
+    use_presence: false
   box_postprocessor:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
     use_original_ids: false
     use_original_sizes_box: false
-    use_presence: ${scratch.use_presence_eval}
+    use_presence: false
   box_postprocessor_thresholded:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
     use_original_ids: false
     use_original_sizes_box: false
     detection_threshold: 0.3
-    use_presence: ${scratch.use_presence_eval}
+    use_presence: false
   mask_postprocessor_thresholded:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
@@ -57,7 +63,7 @@ scratch:
     use_original_sizes_mask: true
     convert_mask_to_rle: true
     detection_threshold: 0.3
-    use_presence: ${scratch.use_presence_eval}
+    use_presence: false
     always_interpolate_masks_on_gpu: false
   resolution: 1008
   max_ann_per_img: 200
@@ -87,9 +93,9 @@ scratch:
   context_length: 2
   gather_pred_via_filesys: false
   lr_scale: 0.1
-  lr_transformer: ${times:8e-4,${scratch.lr_scale}}
-  lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
-  lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
+  lr_transformer: 8.0e-05
+  lr_vision_backbone: 2.5e-05
+  lr_language_backbone: 5.0e-06
   lrd_vision_backbone: 0.9
   wd: 0.1
   scheduler_timescale: 20
@@ -100,13 +106,13 @@ trainer:
   skip_saving_ckpts: true
   empty_gpu_mem_cache_after_eval: true
   skip_first_val: true
-  max_epochs: ${scratch.max_data_epochs}
-  accelerator: cpu
+  max_epochs: 20
+  accelerator: cuda
   seed_value: 123
   val_epoch_freq: 10
   mode: val
   distributed:
-    backend: gloo
+    backend: nccl
     find_unused_parameters: true
     gradient_as_bucket_view: true
   loss:
@@ -125,9 +131,28 @@ trainer:
           include_negatives: true
           category_chunk_size: 8
           _partial_: true
-        img_folder: ${paths.img_path}
-        ann_file: ${paths.coco_gt}
-        transforms: ${scratch.base_val_transform}
+        img_folder: /home/daizi/data/real_wire
+        ann_file: /home/daizi/data/real_wire/coco_all.json
+        transforms:
+        - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+          transforms:
+          - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+            sizes: 1008
+            max_size:
+              _target_: sam3.train.transforms.basic.get_random_resize_max_size
+              size: 1008
+            square: true
+            consistent_transform: false
+          - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+          - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+            mean:
+            - 0.5
+            - 0.5
+            - 0.5
+            std:
+            - 0.5
+            - 0.5
+            - 0.5
         max_ann_per_img: 100000
         multiplier: 1
         training: false
@@ -139,44 +164,49 @@ trainer:
       collate_fn:
         _target_: sam3.train.data.collator.collate_fn_api
         _partial_: true
-        repeats: ${scratch.hybrid_repeats}
-        dict_key: small_coco
+        repeats: 1
+        dict_key: real_wire
   model:
     _target_: sam3.model_builder.build_sam3_image_model
-    bpe_path: ${paths.bpe_path}
+    bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
     device: cpus
     eval_mode: true
     enable_segmentation: true
-    checkpoint_path: ${paths.checkpoint_path}
+    checkpoint_path: /home/daizi/sam3/outputs/synthetic_wire_finetune_4/checkpoints/checkpoint_for_eval_detector.pt
   meters:
     val:
-      small_coco:
-        bbox:
-          _target_: sam3.eval.coco_writer.PredictionDumper
-          iou_type: bbox
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
-          merge_predictions: true
-          postprocessor: ${scratch.original_box_postprocessor}
-          maxdets: 100
-          pred_file_evaluators:
-          - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-            gt_path: ${paths.coco_gt}
-            tide: false
-            iou_type: bbox
+      real_wire:
         segm:
-          _target_: sam3.eval.coco_writer.PredictionDumper
+          _target_: sam3.eval.streaming_coco_writer.StreamingPredictionDumper
           iou_type: segm
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
+          dump_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/dumps/real_wire
           merge_predictions: true
-          postprocessor: ${scratch.mask_postprocessor_thresholded}
+          postprocessor:
+            _target_: sam3.eval.postprocessors.PostProcessImage
+            max_dets_per_img: -1
+            iou_type: segm
+            use_original_ids: false
+            use_original_sizes_box: false
+            use_original_sizes_mask: true
+            convert_mask_to_rle: true
+            detection_threshold: 0.3
+            use_presence: false
+            always_interpolate_masks_on_gpu: false
           maxdets: 100
+          stream_gt_path: /home/daizi/data/real_wire/coco_all.json
+          stream_eval_threshold: 0.5
+          stream_eval_every_n_updates: 25
+          stream_eval_min_images: 32
+          stream_eval_compute_coco: true
+          stream_eval_compute_demo: true
+          stream_global_gather: false
           pred_file_evaluators:
           - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-            gt_path: ${paths.coco_gt}
+            gt_path: /home/daizi/data/real_wire/coco_all.json
             tide: false
             iou_type: segm
           - _target_: sam3.eval.per_image_mask_metrics_fast.PerImageMaskMetricsFastEvaluator
-            gt_path: ${paths.coco_gt}
+            gt_path: /home/daizi/data/real_wire/coco_all.json
             iou_type: segm
             threshold: 0.5
             confidence_thresholds:
@@ -198,13 +228,15 @@ trainer:
             - 0.003
             - 0.004
             - 0.005
-            num_workers: null
-            chunk_size: 8
-            output_json: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.json
-            output_csv: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.csv
+            num_workers: 36
+            chunk_size: 1
+            multiprocessing_context: fork
+            torch_num_threads_per_worker: 1
+            output_json: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/dumps/real_wire/per_image_metrics_segm.json
+            output_csv: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/dumps/real_wire/per_image_metrics_segm.csv
   optim:
     amp:
-      enabled: false
+      enabled: true
       amp_dtype: bfloat16
     optimizer:
       _target_: torch.optim.AdamW
@@ -215,7 +247,7 @@ trainer:
     param_group_modifiers:
     - _target_: sam3.train.optim.optimizer.layer_decay_param_modifier
       _partial_: true
-      layer_decay_value: ${scratch.lrd_vision_backbone}
+      layer_decay_value: 0.9
       apply_to: backbone.vision_backbone.trunk
       overrides:
       - pattern: '*pos_embed*'
@@ -224,30 +256,30 @@ trainer:
       lr:
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: ${scratch.lr_transformer}
-          timescale: ${scratch.scheduler_timescale}
-          warmup_steps: ${scratch.scheduler_warmup}
-          cooldown_steps: ${scratch.scheduler_cooldown}
+          base_lr: 8.0e-05
+          timescale: 20
+          warmup_steps: 20
+          cooldown_steps: 20
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: ${scratch.lr_vision_backbone}
-          timescale: ${scratch.scheduler_timescale}
-          warmup_steps: ${scratch.scheduler_warmup}
-          cooldown_steps: ${scratch.scheduler_cooldown}
+          base_lr: 2.5e-05
+          timescale: 20
+          warmup_steps: 20
+          cooldown_steps: 20
         param_names:
         - backbone.vision_backbone.*
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: ${scratch.lr_language_backbone}
-          timescale: ${scratch.scheduler_timescale}
-          warmup_steps: ${scratch.scheduler_warmup}
-          cooldown_steps: ${scratch.scheduler_cooldown}
+          base_lr: 5.0e-06
+          timescale: 20
+          warmup_steps: 20
+          cooldown_steps: 20
         param_names:
         - backbone.language_backbone.*
       weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-          value: ${scratch.wd}
+          value: 0.1
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
           value: 0.0
@@ -256,21 +288,22 @@ trainer:
         module_cls_names:
         - torch.nn.LayerNorm
   checkpoint:
-    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/checkpoints
     save_freq: 0
   logging:
     tensorboard_writer:
       _target_: sam3.train.utils.logger.make_tensorboard_logger
-      log_dir: ${launcher.experiment_log_dir}/tensorboard
+      log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/tensorboard
       flush_secs: 120
       should_log: true
     wandb_writer: null
-    log_dir: ${launcher.experiment_log_dir}/logs/
-    log_freq: 10
+    log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1/logs/
+    log_freq: 5
+    log_scalar_frequency: 20
 launcher:
   num_nodes: 1
   gpus_per_node: 1
-  experiment_log_dir: ${paths.experiment_log_dir}
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4_run1
   multiprocessing_context: forkserver
 submitit:
   account: null

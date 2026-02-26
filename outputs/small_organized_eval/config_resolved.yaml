@@ -215,7 +215,7 @@ trainer:
             gt_path: /home/daizi/sam3/img/small_organized/coco/annotations.json
             tide: false
             iou_type: segm
-          - _target_: sam3.eval.per_image_mask_metrics.PerImageMaskMetricsEvaluator
+          - _target_: sam3.eval.per_image_mask_metrics_fast.PerImageMaskMetricsFastEvaluator
             gt_path: /home/daizi/sam3/img/small_organized/coco/annotations.json
             iou_type: segm
             threshold: 0.5
@@ -238,6 +238,8 @@ trainer:
             - 0.003
             - 0.004
             - 0.005
+            num_workers: null
+            chunk_size: 8
             output_json: /home/daizi/sam3/outputs/small_organized_eval/dumps/small_coco/per_image_metrics_segm.json
             output_csv: /home/daizi/sam3/outputs/small_organized_eval/dumps/small_coco/per_image_metrics_segm.csv
   optim:

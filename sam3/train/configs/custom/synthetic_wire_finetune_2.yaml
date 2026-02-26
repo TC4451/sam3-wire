@@ -3,77 +3,62 @@ defaults:
   - /configs/eval_base.yaml
   - _self_
 
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
 paths:
-  checkpoint_path: null  # keep null to download from HF; or set a local ckpt path
+  checkpoint_path: null
   bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-
-  experiment_log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune_stable
+  experiment_log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune_4
 
   data_root: ${oc.env:HOME}/data/synthetic_wire
+  img_path: ${paths.data_root}
   train_coco_gt: ${paths.data_root}/train.json
   valid_coco_gt: ${paths.data_root}/valid.json
   test_coco_gt: ${paths.data_root}/test.json
-  img_path: ${paths.data_root}
 
+# -----------------------------------------------------------------------------
+# Scratch (hyperparams / transforms)
+# -----------------------------------------------------------------------------
 scratch:
-  # -------------------------
-  # Core setup
-  # -------------------------
+  # ---- dataset / io ----
+  # keep your presence eval behavior (matches eval_base)
   use_presence_eval: true
-  enable_segmentation: true
 
-  # Resolution (eval_base uses 1008 by default)
+  # ---- image sizes ----
+  # eval_base sets resolution: 1008; keep unless you have a reason to change
   resolution: 1008
 
-  # Normalization (eval_base already defines these, keeping explicit is fine)
+  # ---- dataloader ----
+  train_batch_size: 1
+  val_batch_size: 1
+  test_batch_size: 1
+  num_train_workers: 8
+  num_val_workers: 8
+  num_test_workers: 8
+  hybrid_repeats: 1
+
+  # ---- normalization ----
   train_norm_mean: [0.5, 0.5, 0.5]
   train_norm_std:  [0.5, 0.5, 0.5]
   val_norm_mean:   [0.5, 0.5, 0.5]
   val_norm_std:    [0.5, 0.5, 0.5]
 
-  max_ann_per_img: 200
-  hybrid_repeats: 1
-
-  # -------------------------
-  # Stability knobs (main fixes for NaN)
-  # -------------------------
-  # Much smaller than eval_base default 0.1
-  lr_scale: 0.01
-  lr_transformer: ${times:8e-4,${scratch.lr_scale}}
-  lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
-  lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
-  lrd_vision_backbone: 0.9
-  wd: 0.1
-
-  # Longer warmup than eval_base default 20
+  # ---- stability / NaN control knobs (LR & schedule) ----
+  # Official eval_base defines lr_* from lr_scale (and schedulers use those). :contentReference[oaicite:3]{index=3}
+  # If you're getting NaNs in out_bbox/out_score, LOWER this first.
+  lr_scale: 0.02          # was 0.1 in eval_base
   scheduler_timescale: 20
-  scheduler_warmup: 400
-  scheduler_cooldown: 0
+  scheduler_warmup: 200   # was 20 in eval_base; longer warmup often helps stability
+  scheduler_cooldown: 20
+  wd: 0.1
+  lrd_vision_backbone: 0.9
 
-  # Reduce mask loss weights (thin wires often explode with 200/10)
-  w_loss_bbox: 5.0
-  w_loss_giou: 2.0
-  w_loss_ce: 10.0
-  w_presence: 10.0
-  w_loss_mask: 20.0
-  w_loss_dice: 1.0
-
-  # Postprocess thresholds for val dumping
-  mask_postprocessor_thresholded:
-    detection_threshold: 0.3
-    always_interpolate_masks_on_gpu: false
-
-  # -------------------------
-  # Transforms
-  # -------------------------
+  # ---- transforms ----
+  # IMPORTANT: DecodeRle must come BEFORE any resize/pad that touches masks.
   base_train_transform:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
       transforms:
-        - _target_: sam3.train.transforms.filter_transforms.FilterCrowds
-        - _target_: sam3.train.transforms.find_and_seg.RandomizeInputBbox
-          randomize_bbox_std: 0.1
-          randomize_input_bbox: true
-
         - _target_: sam3.train.transforms.segmentation.DecodeRle
 
         - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
@@ -93,25 +78,16 @@ scratch:
           consistent_transform: false
 
         - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
-
-        # Drop empty targets (important if some images have no instances)
-        - _target_: sam3.train.transforms.filter_transforms.FilterEmptyTargets
-
         - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
           mean: ${scratch.train_norm_mean}
           std: ${scratch.train_norm_std}
 
-        - _target_: sam3.train.transforms.filter_transforms.FilterEmptyTargets
-
-        - _target_: sam3.train.transforms.filter_transforms.FilterFindQueriesWithTooManyOut
-          max_out_per_query: 200
-
+  # Deterministic val transform, still decodes RLE (fixes your KeyError)
   base_val_transform:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
       transforms:
         - _target_: sam3.train.transforms.segmentation.DecodeRle
 
-        # Deterministic resize for val (no random scales)
         - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
           sizes: ${scratch.resolution}
           max_size:
@@ -125,13 +101,11 @@ scratch:
           consistent_transform: false
 
         - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
-        - _target_: sam3.train.transforms.filter_transforms.FilterEmptyTargets
         - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
           mean: ${scratch.val_norm_mean}
           std: ${scratch.val_norm_std}
-        - _target_: sam3.train.transforms.filter_transforms.FilterEmptyTargets
 
-  # Minimal test transform (only used if you wire a test dataloader elsewhere)
+  # Minimal test/inference transform (no GT mask needed)
   base_test_transform:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
       transforms:
@@ -141,35 +115,35 @@ scratch:
             _target_: sam3.train.transforms.basic.get_random_resize_max_size
             size: ${scratch.resolution}
           square: true
-          consistent_transform: false
-        - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
-          size: ${scratch.resolution}
-          consistent_transform: false
+          consistent_transform: true
         - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
         - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
           mean: ${scratch.val_norm_mean}
           std: ${scratch.val_norm_std}
 
-  # -------------------------
-  # Collate
-  # -------------------------
+  # ---- collators ----
   collate_fn_train:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
     repeats: ${scratch.hybrid_repeats}
     dict_key: all
-    with_seg_masks: ${scratch.enable_segmentation}
+    with_seg_masks: true
 
   collate_fn_val:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
+    repeats: ${scratch.hybrid_repeats}
+    dict_key: synthetic_wire
+    with_seg_masks: true
+
+  collate_fn_test:
+    _target_: sam3.train.data.collator.collate_fn_api
+    _partial_: true
     repeats: 1
     dict_key: synthetic_wire
-    with_seg_masks: ${scratch.enable_segmentation}
+    with_seg_masks: false
 
-  # -------------------------
-  # Matcher
-  # -------------------------
+  # ---- matcher ----
   matcher:
     _target_: sam3.train.matcher.BinaryHungarianMatcherV2
     focal: true
@@ -180,11 +154,19 @@ scratch:
     gamma: 2
     stable: false
 
+  # ---- postproc (used by PredictionDumper) ----
+  mask_postprocessor_thresholded:
+    detection_threshold: 0.3
+    always_interpolate_masks_on_gpu: false
+
+# -----------------------------------------------------------------------------
+# Trainer
+# -----------------------------------------------------------------------------
 trainer:
   mode: train
+  max_epochs: 5
   accelerator: cuda
   seed_value: 123
-  max_epochs: 5
 
   skip_saving_ckpts: false
   skip_first_val: false
@@ -200,22 +182,104 @@ trainer:
     _target_: sam3.model_builder.build_sam3_image_model
     bpe_path: ${paths.bpe_path}
     checkpoint_path: ${paths.checkpoint_path}
-    load_from_HF: true
-    device: cpus
+    device: cuda
     eval_mode: false
-    enable_segmentation: ${scratch.enable_segmentation}
+    enable_segmentation: true
 
-  # Optim: keep eval_base structure; IMPORTANT: amp_dtype must be under amp:
+  data:
+    train:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          # prompts is eval()'d by the loader, so keep it a string. :contentReference[oaicite:4]{index=4}
+          prompts: |
+            [{"id": 1, "name": "cable"}]
+          include_negatives: true
+          category_chunk_size: 8
+          _partial_: true
+        img_folder: ${paths.img_path}
+        ann_file: ${paths.train_coco_gt}
+        transforms: ${scratch.base_train_transform}
+        load_segmentation: true
+        max_ann_per_img: 200
+        multiplier: 1
+        training: true
+      shuffle: true
+      batch_size: ${scratch.train_batch_size}
+      num_workers: ${scratch.num_train_workers}
+      pin_memory: false
+      drop_last: false
+      collate_fn: ${scratch.collate_fn_train}
+
+    val:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          prompts: |
+            [{"id": 1, "name": "cable"}]
+          include_negatives: true
+          category_chunk_size: 8
+          _partial_: true
+        img_folder: ${paths.img_path}
+        ann_file: ${paths.valid_coco_gt}
+        transforms: ${scratch.base_val_transform}
+        load_segmentation: true
+        max_ann_per_img: 200
+        multiplier: 1
+        training: false
+      shuffle: false
+      batch_size: ${scratch.val_batch_size}
+      num_workers: ${scratch.num_val_workers}
+      pin_memory: false
+      drop_last: false
+      collate_fn: ${scratch.collate_fn_val}
+
+    # Optional: inference-only test loader (no GT masks loaded)
+    test:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          prompts: |
+            [{"id": 1, "name": "cable"}]
+          include_negatives: false
+          category_chunk_size: 8
+          _partial_: true
+        img_folder: ${paths.img_path}
+        ann_file: ${paths.test_coco_gt}
+        transforms: ${scratch.base_test_transform}
+        load_segmentation: false
+        max_ann_per_img: 200
+        multiplier: 1
+        training: false
+      shuffle: false
+      batch_size: ${scratch.test_batch_size}
+      num_workers: ${scratch.num_test_workers}
+      pin_memory: false
+      drop_last: false
+      collate_fn: ${scratch.collate_fn_test}
+
+  # -----------------------------------------------------------------------------
+  # OPTIM (LR is controlled by scratch.lr_scale -> scratch.lr_transformer etc). :contentReference[oaicite:5]{index=5}
+  # -----------------------------------------------------------------------------
   optim:
     amp:
-      enabled: true
+      enabled: false
       amp_dtype: bfloat16
+
     optimizer:
       _target_: torch.optim.AdamW
+
     gradient_clip:
       _target_: sam3.train.optim.optimizer.GradientClipper
       max_norm: 0.1
       norm_type: 2
+
     param_group_modifiers:
       - _target_: sam3.train.optim.optimizer.layer_decay_param_modifier
         _partial_: true
@@ -224,6 +288,7 @@ trainer:
         overrides:
           - pattern: '*pos_embed*'
             value: 1.0
+
     options:
       lr:
         - scheduler:
@@ -248,6 +313,7 @@ trainer:
             cooldown_steps: ${scratch.scheduler_cooldown}
           param_names:
             - 'backbone.language_backbone.*'
+
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
@@ -259,61 +325,16 @@ trainer:
             - '*bias*'
           module_cls_names: ['torch.nn.LayerNorm']
 
-  data:
-    train:
-      _target_: sam3.train.data.torch_dataset.TorchDataset
-      dataset:
-        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
-        coco_json_loader:
-          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
-          prompts: '[{"id": 1, "name": "cable"}]'
-          include_negatives: false
-          category_chunk_size: 8
-          _partial_: true
-        img_folder: ${paths.img_path}
-        ann_file: ${paths.train_coco_gt}
-        transforms: ${scratch.base_train_transform}
-        load_segmentation: true
-        max_ann_per_img: ${scratch.max_ann_per_img}
-        multiplier: 1
-        training: true
-      shuffle: true
-      batch_size: ${scratch.train_batch_size}
-      num_workers: 8
-      pin_memory: false
-      drop_last: false
-      collate_fn: ${scratch.collate_fn_train}
-
-    val:
-      _target_: sam3.train.data.torch_dataset.TorchDataset
-      dataset:
-        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
-        coco_json_loader:
-          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
-          prompts: '[{"id": 1, "name": "cable"}]'
-          include_negatives: false
-          category_chunk_size: 8
-          _partial_: true
-        img_folder: ${paths.img_path}
-        ann_file: ${paths.valid_coco_gt}
-        transforms: ${scratch.base_val_transform}
-        load_segmentation: true
-        max_ann_per_img: 100000
-        multiplier: 1
-        training: false
-      shuffle: false
-      batch_size: ${scratch.val_batch_size}
-      num_workers: 8
-      pin_memory: false
-      drop_last: false
-      collate_fn: ${scratch.collate_fn_val}
-
+  # -----------------------------------------------------------------------------
+  # LOSS (edit weights here)
+  # -----------------------------------------------------------------------------
   loss:
     all:
       _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
       matcher: ${scratch.matcher}
 
-      o2m_weight: 2.0
+      # one-to-many matcher (keep but lighter)
+      o2m_weight: 1.0
       o2m_matcher:
         _target_: sam3.train.matcher.BinaryOneToManyMatcher
         alpha: 0.3
@@ -324,15 +345,15 @@ trainer:
       loss_fns_find:
         - _target_: sam3.train.loss.loss_fns.Boxes
           weight_dict:
-            loss_bbox: ${scratch.w_loss_bbox}
-            loss_giou: ${scratch.w_loss_giou}
+            loss_bbox: 1.0
+            loss_giou: 1.0
 
         - _target_: sam3.train.loss.loss_fns.IABCEMdetr
           weak_loss: false
           weight_dict:
-            loss_ce: ${scratch.w_loss_ce}
-            presence_loss: ${scratch.w_presence}
-          pos_weight: 5.0
+            loss_ce: 20.0
+            presence_loss: 20.0
+          pos_weight: 10.0
           alpha: 0.25
           gamma: 2
           use_presence: true
@@ -340,12 +361,13 @@ trainer:
           pad_n_queries: 200
           pad_scale_pos: 1.0
 
+        # Instance seg: you can reduce these if training blows up (NaNs).
         - _target_: sam3.train.loss.loss_fns.Masks
           focal_alpha: 0.25
           focal_gamma: 2.0
           weight_dict:
-            loss_mask: ${scratch.w_loss_mask}
-            loss_dice: ${scratch.w_loss_dice}
+            loss_mask: 50.0   # was 200.0 in your config
+            loss_dice: 5.0    # was 10.0
           compute_aux: false
 
       loss_fn_semantic_seg: null
@@ -354,6 +376,9 @@ trainer:
     default:
       _target_: sam3.train.loss.sam3_loss.DummyLoss
 
+  # -----------------------------------------------------------------------------
+  # METERS (dump + offline coco eval)
+  # -----------------------------------------------------------------------------
   meters:
     val:
       synthetic_wire:
@@ -376,16 +401,19 @@ trainer:
     save_freq: 1
 
   logging:
+    log_dir: ${launcher.experiment_log_dir}/logs/
+    log_freq: 10
+    log_scalar_frequency: 20
     tensorboard_writer:
       _target_: sam3.train.utils.logger.make_tensorboard_logger
       log_dir: ${launcher.experiment_log_dir}/tensorboard
       flush_secs: 120
       should_log: true
     wandb_writer: null
-    log_dir: ${launcher.experiment_log_dir}/logs/
-    log_freq: 5
-    log_scalar_frequency: 20
 
+# -----------------------------------------------------------------------------
+# Local run (no slurm)
+# -----------------------------------------------------------------------------
 launcher:
   num_nodes: 1
   gpus_per_node: 1
@@ -393,11 +421,11 @@ launcher:
   multiprocessing_context: forkserver
 
 submitit:
+  use_cluster: false
   account: null
   partition: null
   qos: null
   timeout_hour: 72
-  use_cluster: false
   cpus_per_task: 10
   port_range: [10000, 65000]
   constraint: null

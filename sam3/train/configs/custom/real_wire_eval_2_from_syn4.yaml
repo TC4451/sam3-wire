@@ -4,11 +4,11 @@ defaults:
   - _self_
 
 paths:
-  checkpoint_path: null
+  checkpoint_path: /home/daizi/sam3/outputs/synthetic_wire_finetune_4/checkpoints/checkpoint_for_eval_detector.pt
   bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-  experiment_log_dir: /home/daizi/sam3/outputs/small_organized_eval
-  coco_gt: /home/daizi/sam3/img/small_organized/coco/annotations.json
-  img_path: /home/daizi/sam3/img/small_organized/rgb
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_2_from_syn4
+  coco_gt: /home/daizi/data/real_wire/coco_all.json
+  img_path: /home/daizi/data/real_wire
 
 scratch:
   use_presence_eval: false
@@ -17,12 +17,12 @@ scratch:
     always_interpolate_masks_on_gpu: false
 
 trainer:
-  accelerator: cpu
+  accelerator: cuda
   distributed:
-    backend: gloo
+    backend: nccl
   optim:
     amp:
-      enabled: false
+      enabled: true
   data:
     val:
       _target_: sam3.train.data.torch_dataset.TorchDataset
@@ -48,30 +48,25 @@ trainer:
         _target_: sam3.train.data.collator.collate_fn_api
         _partial_: true
         repeats: ${scratch.hybrid_repeats}
-        dict_key: small_coco
+        dict_key: real_wire
 
   meters:
     val:
-      small_coco:
-        bbox:
-          _target_: sam3.eval.coco_writer.PredictionDumper
-          iou_type: "bbox"
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
-          merge_predictions: true
-          postprocessor: ${scratch.original_box_postprocessor}
-          maxdets: 100
-          pred_file_evaluators:
-            - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-              gt_path: ${paths.coco_gt}
-              tide: false
-              iou_type: "bbox"
+      real_wire:
         segm:
-          _target_: sam3.eval.coco_writer.PredictionDumper
+          _target_: sam3.eval.streaming_coco_writer.StreamingPredictionDumper
           iou_type: "segm"
-          dump_dir: ${launcher.experiment_log_dir}/dumps/small_coco
+          dump_dir: ${launcher.experiment_log_dir}/dumps/real_wire
           merge_predictions: true
           postprocessor: ${scratch.mask_postprocessor_thresholded}
           maxdets: 100
+          stream_gt_path: ${paths.coco_gt}
+          stream_eval_threshold: 0.5
+          stream_eval_every_n_updates: 25
+          stream_eval_min_images: 32
+          stream_eval_compute_coco: true
+          stream_eval_compute_demo: true
+          stream_global_gather: false
           pred_file_evaluators:
             - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
               gt_path: ${paths.coco_gt}
@@ -83,10 +78,15 @@ trainer:
               threshold: 0.5
               confidence_thresholds: [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
               boundary_rel_tolerances: [0.001, 0.002, 0.003, 0.004, 0.005]
-              num_workers: null
-              chunk_size: 8
-              output_json: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.json
-              output_csv: ${launcher.experiment_log_dir}/dumps/small_coco/per_image_metrics_segm.csv
+              num_workers: 36
+              chunk_size: 1
+              multiprocessing_context: "fork"
+              torch_num_threads_per_worker: 1
+              output_json: ${launcher.experiment_log_dir}/dumps/real_wire/per_image_metrics_segm.json
+              output_csv: ${launcher.experiment_log_dir}/dumps/real_wire/per_image_metrics_segm.csv
+  logging:
+    log_freq: 5
+    log_scalar_frequency: 20
 
 launcher:
   num_nodes: 1

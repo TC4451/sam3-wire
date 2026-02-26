@@ -17,16 +17,20 @@ Expected layout (example):
 
 Run:
   pip install pycocotools pillow numpy
+  # Convert from rgb/seg folder layout:
   python convert_mask_to_coco.py /path/to/data_root /path/to/output.json
+  # Or sanitize an existing COCO JSON (auto-detected):
+  python convert_mask_to_coco.py /path/to/input_coco.json /path/to/output_coco.json
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -76,6 +80,57 @@ def encode_rle(binary_mask: np.ndarray) -> Dict[str, Any]:
     rle["counts"] = rle["counts"].decode("ascii")  # bytes -> str for JSON
     return rle
 
+
+def decode_rle_counts_if_needed(rle: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure compressed RLE counts is str for JSON serialization."""
+    if isinstance(rle.get("counts"), bytes):
+        rle = dict(rle)
+        rle["counts"] = rle["counts"].decode("ascii")
+    return rle
+
+
+def normalize_rle_to_image_size(
+    rle: Dict[str, Any], image_h: int, image_w: int
+) -> Tuple[Dict[str, Any] | None, str]:
+    """
+    Normalize one RLE to match image (H, W).
+
+    Returns:
+        (normalized_rle_or_none, status)
+    status is one of:
+        ok, fixed_by_reencode, fixed_by_transpose, invalid_size, decode_failed, shape_mismatch
+    """
+    rle = decode_rle_counts_if_needed(rle)
+    size = rle.get("size")
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        return None, "invalid_size"
+
+    try:
+        rle_h, rle_w = int(size[0]), int(size[1])
+    except Exception:
+        return None, "invalid_size"
+
+    if (rle_h, rle_w) == (image_h, image_w):
+        return rle, "ok"
+
+    try:
+        decoded = mask_utils.decode(rle)
+    except Exception:
+        return None, "decode_failed"
+
+    if decoded.ndim == 3:
+        decoded = decoded[..., 0]
+    decoded = (decoded > 0).astype(np.uint8)
+
+    if decoded.shape == (image_h, image_w):
+        return encode_rle(decoded), "fixed_by_reencode"
+
+    if decoded.shape == (image_w, image_h):
+        decoded_t = np.ascontiguousarray(decoded.T)
+        return encode_rle(decoded_t), "fixed_by_transpose"
+
+    return None, "shape_mismatch"
+
 def encode_rle_uncompressed(binary_mask: np.ndarray) -> Dict[str, Any]:
     """Encode binary mask to *uncompressed* COCO RLE (counts as list[int])."""
     if binary_mask.ndim != 2:
@@ -106,6 +161,108 @@ def encode_rle_uncompressed(binary_mask: np.ndarray) -> Dict[str, Any]:
         counts = [0] + counts
 
     return {"size": [h, w], "counts": counts}
+
+
+def sanitize_coco_annotation_rles(
+    coco: Dict[str, Any], drop_unfixable: bool = True
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """
+    Fix malformed annotation RLE sizes against image metadata.
+
+    If drop_unfixable=True, invalid annotations are removed. Otherwise they are kept unchanged.
+    """
+    image_hw: Dict[int, Tuple[int, int]] = {
+        int(img["id"]): (int(img["height"]), int(img["width"]))
+        for img in coco.get("images", [])
+        if "id" in img and "height" in img and "width" in img
+    }
+
+    stats = {
+        "annotations_total": 0,
+        "rle_annotations_checked": 0,
+        "fixed_by_reencode": 0,
+        "fixed_by_transpose": 0,
+        "dropped_unfixable": 0,
+        "missing_image_metadata": 0,
+    }
+    sanitized: List[Dict[str, Any]] = []
+
+    for ann in coco.get("annotations", []):
+        stats["annotations_total"] += 1
+        segm = ann.get("segmentation")
+
+        # Only RLE dicts can carry a malformed size field.
+        if not (isinstance(segm, dict) and "counts" in segm and "size" in segm):
+            sanitized.append(ann)
+            continue
+
+        img_id = int(ann.get("image_id", -1))
+        hw = image_hw.get(img_id)
+        if hw is None:
+            stats["missing_image_metadata"] += 1
+            if drop_unfixable:
+                stats["dropped_unfixable"] += 1
+            else:
+                sanitized.append(ann)
+            continue
+
+        image_h, image_w = hw
+        stats["rle_annotations_checked"] += 1
+        normalized_rle, status = normalize_rle_to_image_size(segm, image_h, image_w)
+
+        if normalized_rle is None:
+            if drop_unfixable:
+                stats["dropped_unfixable"] += 1
+            else:
+                sanitized.append(ann)
+            continue
+
+        out_ann = dict(ann)
+        out_ann["segmentation"] = normalized_rle
+        if status == "fixed_by_reencode":
+            stats["fixed_by_reencode"] += 1
+        elif status == "fixed_by_transpose":
+            stats["fixed_by_transpose"] += 1
+
+        try:
+            out_ann["area"] = float(mask_utils.area(normalized_rle))
+        except Exception:
+            pass
+        try:
+            bbox = mask_utils.toBbox(normalized_rle).tolist()
+            out_ann["bbox"] = [float(x) for x in bbox]
+        except Exception:
+            pass
+
+        sanitized.append(out_ann)
+
+    return sanitized, stats
+
+
+def sanitize_coco_json(
+    in_json: Path, out_json: Path, drop_unfixable: bool = True
+) -> Path:
+    coco = json.loads(in_json.read_text())
+    sanitized_annotations, stats = sanitize_coco_annotation_rles(
+        coco, drop_unfixable=drop_unfixable
+    )
+    coco["annotations"] = sanitized_annotations
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(coco, indent=2))
+
+    fixed_total = stats["fixed_by_reencode"] + stats["fixed_by_transpose"]
+    print(f"Wrote sanitized COCO JSON: {out_json}")
+    print(
+        "Sanitizer summary | "
+        f"annotations={stats['annotations_total']} "
+        f"rle_checked={stats['rle_annotations_checked']} "
+        f"fixed={fixed_total} "
+        f"(reencode={stats['fixed_by_reencode']}, transpose={stats['fixed_by_transpose']}) "
+        f"dropped={stats['dropped_unfixable']} "
+        f"missing_image_meta={stats['missing_image_metadata']}"
+    )
+    return out_json
 
 # ----------------------------
 # Main conversion
@@ -293,15 +450,37 @@ def build_single_coco_from_root(
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert color masks to COCO JSON, or sanitize an existing COCO JSON "
+            "by fixing/dropping invalid RLE sizes. Mode is auto-detected from input path."
+        )
+    )
+    parser.add_argument(
+        "input_path",
+        type=Path,
+        help="Data root directory (convert mode) or input COCO JSON file (sanitize mode).",
+    )
+    parser.add_argument("output_json", type=Path, help="Output JSON path.")
+    parser.add_argument(
+        "--keep-unfixable",
+        action="store_true",
+        help="Keep malformed annotations that cannot be normalized (default: drop).",
+    )
+    args = parser.parse_args()
 
-    if len(sys.argv) != 3:
-        print("Usage: python convert_mask_to_coco.py /path/to/data_root /path/to/output.json")
-        raise SystemExit(2)
-
-    build_single_coco_from_root(Path(sys.argv[1]), Path(sys.argv[2]))
-
-
+    if args.input_path.is_file():
+        sanitize_coco_json(
+            args.input_path,
+            args.output_json,
+            drop_unfixable=not args.keep_unfixable,
+        )
+    elif args.input_path.is_dir():
+        build_single_coco_from_root(args.input_path, args.output_json)
+    else:
+        raise FileNotFoundError(
+            f"input_path does not exist or is neither file nor directory: {args.input_path}"
+        )
 
 
 

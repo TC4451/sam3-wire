@@ -7,25 +7,21 @@ paths:
   sa1b_img_path: <YOUR_SA1B_IMG_DIR>
   silver_img_path: <YOUR_SILVER_IMG_DIR>
   bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-  experiment_log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune
-  data_root: /home/daizi/data/synthetic_wire
-  train_coco_gt: /home/daizi/data/synthetic_wire/train.json
-  valid_coco_gt: /home/daizi/data/synthetic_wire/valid.json
-  test_coco_gt: /home/daizi/data/synthetic_wire/test.json
-  img_path: /home/daizi/data/synthetic_wire
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_3
+  coco_gt: /home/daizi/data/real_wire/coco_all.json
+  img_path: /home/daizi/data/real_wire
 scratch:
-  use_presence_eval: true
+  use_presence_eval: false
   base_val_transform:
   - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
     transforms:
-    - _target_: sam3.train.transforms.segmentation.DecodeRle
     - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
       sizes: 1008
+      max_size:
+        _target_: sam3.train.transforms.basic.get_random_resize_max_size
+        size: 1008
       square: true
-      consistent_transform: true
-    - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
-      size: 1008
-      consistent_transform: true
+      consistent_transform: false
     - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
     - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
       mean:
@@ -44,20 +40,20 @@ scratch:
     max_dets_per_img: -1
     use_original_ids: true
     use_original_sizes_box: true
-    use_presence: true
+    use_presence: false
   box_postprocessor:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
     use_original_ids: false
     use_original_sizes_box: false
-    use_presence: true
+    use_presence: false
   box_postprocessor_thresholded:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
     use_original_ids: false
     use_original_sizes_box: false
     detection_threshold: 0.3
-    use_presence: true
+    use_presence: false
   mask_postprocessor_thresholded:
     _target_: sam3.eval.postprocessors.PostProcessImage
     max_dets_per_img: -1
@@ -67,7 +63,7 @@ scratch:
     use_original_sizes_mask: true
     convert_mask_to_rle: true
     detection_threshold: 0.3
-    use_presence: true
+    use_presence: false
     always_interpolate_masks_on_gpu: false
   resolution: 1008
   max_ann_per_img: 200
@@ -96,183 +92,36 @@ scratch:
   hybrid_repeats: 1
   context_length: 2
   gather_pred_via_filesys: false
-  lr_scale: 0.02
-  lr_transformer: 1.6000000000000003e-05
-  lr_vision_backbone: 0.0
-  lr_language_backbone: 0.0
+  lr_scale: 0.1
+  lr_transformer: 8.0e-05
+  lr_vision_backbone: 2.5e-05
+  lr_language_backbone: 5.0e-06
   lrd_vision_backbone: 0.9
   wd: 0.1
   scheduler_timescale: 20
   scheduler_warmup: 20
   scheduler_cooldown: 20
-  base_train_transform:
-  - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
-    transforms:
-    - _target_: sam3.train.transforms.segmentation.DecodeRle
-    - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
-      sizes:
-        _target_: sam3.train.transforms.basic.get_random_resize_scales
-        size: 1008
-        min_size: 800
-        rounded: false
-      max_size:
-        _target_: sam3.train.transforms.basic.get_random_resize_max_size
-        size: 1008
-      square: true
-      consistent_transform: false
-    - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
-      size: 1008
-      consistent_transform: false
-    - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
-    - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
-      mean:
-      - 0.5
-      - 0.5
-      - 0.5
-      std:
-      - 0.5
-      - 0.5
-      - 0.5
-  collate_fn_train:
-    _target_: sam3.train.data.collator.collate_fn_api
-    _partial_: true
-    repeats: 1
-    dict_key: all
-    with_seg_masks: true
-  collate_fn_val:
-    _target_: sam3.train.data.collator.collate_fn_api
-    _partial_: true
-    repeats: 1
-    dict_key: synthetic_wire
-    with_seg_masks: true
-  matcher:
-    _target_: sam3.train.matcher.BinaryHungarianMatcherV2
-    focal: true
-    cost_class: 2.0
-    cost_bbox: 5.0
-    cost_giou: 2.0
-    alpha: 0.25
-    gamma: 2
-    stable: false
-    remove_samples_with_0_gt: true
 trainer:
   _target_: sam3.train.trainer.Trainer
-  skip_saving_ckpts: false
-  empty_gpu_mem_cache_after_eval: false
-  skip_first_val: false
-  max_epochs: 5
+  skip_saving_ckpts: true
+  empty_gpu_mem_cache_after_eval: true
+  skip_first_val: true
+  max_epochs: 20
   accelerator: cuda
   seed_value: 123
-  val_epoch_freq: 1
-  mode: train
+  val_epoch_freq: 10
+  mode: val
   distributed:
     backend: nccl
     find_unused_parameters: true
     gradient_as_bucket_view: true
   loss:
     all:
-      _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
-      matcher:
-        _target_: sam3.train.matcher.BinaryHungarianMatcherV2
-        focal: true
-        cost_class: 2.0
-        cost_bbox: 5.0
-        cost_giou: 2.0
-        alpha: 0.25
-        gamma: 2
-        stable: false
-        remove_samples_with_0_gt: true
-      o2m_weight: 0.0
-      o2m_matcher:
-        _target_: sam3.train.matcher.BinaryOneToManyMatcher
-        alpha: 0.3
-        threshold: 0.4
-        topk: 4
-      use_o2m_matcher_on_o2m_aux: false
-      loss_fns_find:
-      - _target_: sam3.train.loss.loss_fns.Boxes
-        weight_dict:
-          loss_bbox: 1.0
-          loss_giou: 1.0
-      - _target_: sam3.train.loss.loss_fns.IABCEMdetr
-        weak_loss: false
-        weight_dict:
-          loss_ce: 5.0
-          presence_loss: 5.0
-        pos_weight: 10.0
-        alpha: 0.25
-        gamma: 2
-        use_presence: true
-        pos_focal: false
-        pad_n_queries: 200
-        pad_scale_pos: 1.0
-      - _target_: sam3.train.loss.loss_fns.Masks
-        focal_alpha: 0.25
-        focal_gamma: 2.0
-        weight_dict:
-          loss_mask: 50.0
-          loss_dice: 5.0
-        compute_aux: false
-      loss_fn_semantic_seg: null
-      scale_by_find_batch_size: true
+      _target_: sam3.train.loss.sam3_loss.DummyLoss
     default:
       _target_: sam3.train.loss.sam3_loss.DummyLoss
   data:
-    train:
-      _target_: sam3.train.data.torch_dataset.TorchDataset
-      dataset:
-        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
-        coco_json_loader:
-          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
-          prompts: '[{"id": 1, "name": "cable"}]'
-          include_negatives: true
-          category_chunk_size: 8
-          _partial_: true
-        img_folder: /home/daizi/data/synthetic_wire
-        ann_file: /home/daizi/data/synthetic_wire/train.json
-        transforms:
-        - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
-          transforms:
-          - _target_: sam3.train.transforms.segmentation.DecodeRle
-          - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
-            sizes:
-              _target_: sam3.train.transforms.basic.get_random_resize_scales
-              size: 1008
-              min_size: 800
-              rounded: false
-            max_size:
-              _target_: sam3.train.transforms.basic.get_random_resize_max_size
-              size: 1008
-            square: true
-            consistent_transform: false
-          - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
-            size: 1008
-            consistent_transform: false
-          - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
-          - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
-            mean:
-            - 0.5
-            - 0.5
-            - 0.5
-            std:
-            - 0.5
-            - 0.5
-            - 0.5
-        load_segmentation: true
-        max_ann_per_img: 200
-        multiplier: 1
-        training: true
-      shuffle: true
-      batch_size: 1
-      num_workers: 8
-      pin_memory: false
-      drop_last: false
-      collate_fn:
-        _target_: sam3.train.data.collator.collate_fn_api
-        _partial_: true
-        repeats: 1
-        dict_key: all
-        with_seg_masks: true
+    train: null
     val:
       _target_: sam3.train.data.torch_dataset.TorchDataset
       dataset:
@@ -283,19 +132,18 @@ trainer:
           include_negatives: true
           category_chunk_size: 8
           _partial_: true
-        img_folder: /home/daizi/data/synthetic_wire
-        ann_file: /home/daizi/data/synthetic_wire/valid.json
+        img_folder: /home/daizi/data/real_wire
+        ann_file: /home/daizi/data/real_wire/coco_all.json
         transforms:
         - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
           transforms:
-          - _target_: sam3.train.transforms.segmentation.DecodeRle
           - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
             sizes: 1008
+            max_size:
+              _target_: sam3.train.transforms.basic.get_random_resize_max_size
+              size: 1008
             square: true
-            consistent_transform: true
-          - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
-            size: 1008
-            consistent_transform: true
+            consistent_transform: false
           - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
           - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
             mean:
@@ -306,13 +154,12 @@ trainer:
             - 0.5
             - 0.5
             - 0.5
-        load_segmentation: true
         max_ann_per_img: 100000
         multiplier: 1
         training: false
       shuffle: false
       batch_size: 1
-      num_workers: 8
+      num_workers: 1
       pin_memory: false
       drop_last: false
       collate_fn:
@@ -320,21 +167,20 @@ trainer:
         _partial_: true
         repeats: 1
         dict_key: synthetic_wire
-        with_seg_masks: true
   model:
     _target_: sam3.model_builder.build_sam3_image_model
     bpe_path: /home/daizi/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
     device: cpus
-    eval_mode: false
+    eval_mode: true
     enable_segmentation: true
     checkpoint_path: null
   meters:
     val:
       synthetic_wire:
         segm:
-          _target_: sam3.eval.coco_writer.PredictionDumper
+          _target_: sam3.eval.streaming_coco_writer.StreamingPredictionDumper
           iou_type: segm
-          dump_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune/dumps/synthetic_wire
+          dump_dir: /home/daizi/sam3/outputs/real_wire_eval_3/dumps/synthetic_wire
           merge_predictions: true
           postprocessor:
             _target_: sam3.eval.postprocessors.PostProcessImage
@@ -345,18 +191,37 @@ trainer:
             use_original_sizes_mask: true
             convert_mask_to_rle: true
             detection_threshold: 0.3
-            use_presence: true
+            use_presence: false
             always_interpolate_masks_on_gpu: false
-          gather_pred_via_filesys: false
           maxdets: 100
+          stream_gt_path: /home/daizi/data/real_wire/coco_all.json
+          stream_eval_threshold: 0.5
+          stream_eval_every_n_updates: 25
+          stream_eval_min_images: 32
+          stream_eval_compute_coco: true
+          stream_eval_compute_demo: true
+          stream_global_gather: false
           pred_file_evaluators:
           - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-            gt_path: /home/daizi/data/synthetic_wire/valid.json
+            gt_path: /home/daizi/data/real_wire/coco_all.json
             tide: false
             iou_type: segm
+          - _target_: sam3.eval.per_image_mask_metrics_fast.PerImageMaskMetricsFastEvaluator
+            gt_path: /home/daizi/data/real_wire/coco_all.json
+            iou_type: segm
+            threshold: 0.5
+            confidence_thresholds:
+            - 0.5
+            - 0.9
+            boundary_rel_tolerances:
+            - 0.001
+            num_workers: null
+            chunk_size: 8
+            output_json: /home/daizi/sam3/outputs/real_wire_eval_3/dumps/synthetic_wire/per_image_metrics_segm.json
+            output_csv: /home/daizi/sam3/outputs/real_wire_eval_3/dumps/synthetic_wire/per_image_metrics_segm.csv
   optim:
     amp:
-      enabled: false
+      enabled: true
       amp_dtype: bfloat16
     optimizer:
       _target_: torch.optim.AdamW
@@ -376,13 +241,13 @@ trainer:
       lr:
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: 1.6000000000000003e-05
+          base_lr: 8.0e-05
           timescale: 20
           warmup_steps: 20
           cooldown_steps: 20
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: 0.0
+          base_lr: 2.5e-05
           timescale: 20
           warmup_steps: 20
           cooldown_steps: 20
@@ -390,7 +255,7 @@ trainer:
         - backbone.vision_backbone.*
       - scheduler:
           _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
-          base_lr: 0.0
+          base_lr: 5.0e-06
           timescale: 20
           warmup_steps: 20
           cooldown_steps: 20
@@ -408,22 +273,22 @@ trainer:
         module_cls_names:
         - torch.nn.LayerNorm
   checkpoint:
-    save_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune/checkpoints
-    save_freq: 1
+    save_dir: /home/daizi/sam3/outputs/real_wire_eval_3/checkpoints
+    save_freq: 0
   logging:
     tensorboard_writer:
       _target_: sam3.train.utils.logger.make_tensorboard_logger
-      log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune/tensorboard
+      log_dir: /home/daizi/sam3/outputs/real_wire_eval_3/tensorboard
       flush_secs: 120
       should_log: true
     wandb_writer: null
-    log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune/logs/
+    log_dir: /home/daizi/sam3/outputs/real_wire_eval_3/logs/
     log_freq: 5
     log_scalar_frequency: 20
 launcher:
   num_nodes: 1
   gpus_per_node: 1
-  experiment_log_dir: /home/daizi/sam3/outputs/synthetic_wire_finetune
+  experiment_log_dir: /home/daizi/sam3/outputs/real_wire_eval_3
   multiprocessing_context: forkserver
 submitit:
   account: null

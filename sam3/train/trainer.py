@@ -145,6 +145,9 @@ class Trainer:
     """
 
     EPSILON = 1e-8
+    _SKIP_STEP_EXTRA_LOSS_KEY = "__skip_step__"
+    _PREDICTION_KEY_PREFIXES = ("pred_", "presence_")
+    _PREDICTION_KEY_KEYWORDS = ("logit",)
 
     def __init__(
         self,
@@ -501,6 +504,119 @@ class Trainer:
                 return meter
         return None
 
+    def _sync_skip_flag(self, skip_local: bool) -> bool:
+        if not is_dist_avail_and_initialized():
+            return skip_local
+        skip_tensor = torch.tensor(
+            int(skip_local), device=self.device, dtype=torch.int32
+        )
+        dist.all_reduce(skip_tensor, op=dist.ReduceOp.MAX)
+        return bool(skip_tensor.item())
+
+    @classmethod
+    def _is_prediction_tensor_key(cls, tensor_path: str) -> bool:
+        if not tensor_path:
+            return False
+        leaf_key = tensor_path.rsplit(".", 1)[-1]
+        if "[" in leaf_key:
+            leaf_key = leaf_key.split("[", 1)[0]
+        if any(leaf_key.startswith(prefix) for prefix in cls._PREDICTION_KEY_PREFIXES):
+            return True
+        if any(keyword in leaf_key for keyword in cls._PREDICTION_KEY_KEYWORDS):
+            return True
+        return False
+
+    @staticmethod
+    def _iter_nested_tensors(obj: Any, prefix: str = ""):
+        if torch.is_tensor(obj):
+            yield prefix, obj
+            return
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                key_str = str(key)
+                next_prefix = f"{prefix}.{key_str}" if prefix else key_str
+                yield from Trainer._iter_nested_tensors(value, next_prefix)
+            return
+        if isinstance(obj, (list, tuple)):
+            for idx, value in enumerate(obj):
+                next_prefix = f"{prefix}[{idx}]"
+                yield from Trainer._iter_nested_tensors(value, next_prefix)
+
+    def _find_invalid_prediction_reason(
+        self, find_stages: SAM3Output
+    ) -> Optional[str]:
+        if not isinstance(find_stages, SAM3Output):
+            return None
+        with SAM3Output.iteration_mode(
+            find_stages, iter_mode=SAM3Output.IterMode.FLATTENED
+        ) as iter_outputs:
+            for step_idx, step_out in enumerate(iter_outputs):
+                if not isinstance(step_out, dict):
+                    continue
+                for tensor_path, tensor in self._iter_nested_tensors(step_out):
+                    if not self._is_prediction_tensor_key(tensor_path):
+                        continue
+                    if not tensor.is_floating_point():
+                        continue
+
+                    finite = torch.isfinite(tensor)
+                    if not bool(finite.all().item()):
+                        num_nan = int(torch.isnan(tensor).sum().item())
+                        num_inf = int(torch.isinf(tensor).sum().item())
+                        return (
+                            f"non-finite `{tensor_path}` at interactive step {step_idx} "
+                            f"(shape={tuple(tensor.shape)}, nan={num_nan}, inf={num_inf})"
+                        )
+
+                    leaf_key = tensor_path.rsplit(".", 1)[-1]
+                    if "[" in leaf_key:
+                        leaf_key = leaf_key.split("[", 1)[0]
+
+                    if (
+                        leaf_key in {"pred_boxes", "pred_boxes_o2m", "multi_pred_boxes"}
+                        and tensor.numel() > 0
+                        and tensor.size(-1) >= 4
+                    ):
+                        bad_wh = tensor[..., 2:4] <= 0
+                        if bool(bad_wh.any().item()):
+                            bad_count = int(bad_wh.sum().item())
+                            return (
+                                f"degenerate `{tensor_path}` at interactive step {step_idx} "
+                                f"(shape={tuple(tensor.shape)}, non-positive wh count={bad_count})"
+                            )
+
+                    if (
+                        leaf_key
+                        in {
+                            "pred_boxes_xyxy",
+                            "pred_boxes_xyxy_o2m",
+                            "multi_pred_boxes_xyxy",
+                        }
+                        and tensor.numel() > 0
+                        and tensor.size(-1) >= 4
+                    ):
+                        bad_xyxy = (tensor[..., 2] <= tensor[..., 0]) | (
+                            tensor[..., 3] <= tensor[..., 1]
+                        )
+                        if bool(bad_xyxy.any().item()):
+                            bad_count = int(bad_xyxy.sum().item())
+                            return (
+                                f"degenerate `{tensor_path}` at interactive step {step_idx} "
+                                f"(shape={tuple(tensor.shape)}, invalid xyxy count={bad_count})"
+                            )
+        return None
+
+    @staticmethod
+    def _pop_skip_step_flag(extra_losses: Dict[str, Any], skip_key: str) -> bool:
+        if skip_key not in extra_losses:
+            return False
+        flag = extra_losses.pop(skip_key)
+        if torch.is_tensor(flag):
+            if flag.numel() == 0:
+                return False
+            return bool(flag.detach().max().item() > 0)
+        return bool(flag)
+
     def _step(
         self,
         batch: BatchedDatapoint,
@@ -509,17 +625,55 @@ class Trainer:
     ):
         key, batch = batch.popitem()
         batch = copy_data_to_device(batch, self.device, non_blocking=True)
+        batch_size = len(batch.img_batch)
+
+        loss_str = f"Losses/{phase}_{key}_loss"
+        loss_log_str = os.path.join("Step_Losses", loss_str)
 
         find_stages = model(batch)
+        invalid_reason = self._find_invalid_prediction_reason(find_stages)
+        skip_step_local = invalid_reason is not None
+        skip_step = self._sync_skip_flag(skip_step_local)
+        if skip_step:
+            if skip_step_local and self.distributed_rank == 0:
+                logging.warning(
+                    "Skipping %s step %d (%s): %s",
+                    phase,
+                    self.steps[phase],
+                    key,
+                    invalid_reason,
+                )
+            elif self.distributed_rank == 0:
+                logging.warning(
+                    "Skipping %s step %d (%s): invalid predictions detected on another rank",
+                    phase,
+                    self.steps[phase],
+                    key,
+                )
+
+            loss = torch.tensor(0.0, device=self.device)
+            if self.steps[phase] % self.logging_conf.log_scalar_frequency == 0:
+                self.logger.log(loss_log_str, loss, self.steps[phase])
+                self.logger.log(
+                    os.path.join("Step_Stats", phase, "Skipped Invalid Batch"),
+                    1.0,
+                    self.steps[phase],
+                )
+            self.steps[phase] += 1
+            return (
+                {loss_str: loss},
+                batch_size,
+                {
+                    self._SKIP_STEP_EXTRA_LOSS_KEY: torch.tensor(
+                        1.0, device=self.device
+                    )
+                },
+            )
+
         find_targets = [
             unwrap_ddp_if_wrapped(model).back_convert(x) for x in batch.find_targets
         ]
-        batch_size = len(batch.img_batch)
         loss = self._find_loss(key)(find_stages, find_targets)
-
-        loss_str = f"Losses/{phase}_{key}_loss"
-
-        loss_log_str = os.path.join("Step_Losses", loss_str)
 
         # loss contains multiple sub-components we wish to log
         step_losses = {}
@@ -671,6 +825,7 @@ class Trainer:
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
         )
         extra_loss_mts = {}
+        skipped_invalid_batches = 0
 
         for model in curr_models:
             model.eval()
@@ -709,6 +864,12 @@ class Trainer:
                             model,
                             phase,
                         )
+                        skip_step = self._pop_skip_step_flag(
+                            extra_losses, self._SKIP_STEP_EXTRA_LOSS_KEY
+                        )
+                        if skip_step:
+                            skipped_invalid_batches += 1
+                            continue
 
                         assert len(loss_dict) == 1
                         loss_key, loss = loss_dict.popitem()
@@ -759,6 +920,7 @@ class Trainer:
             out_dict[k] = v.avg
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
+        out_dict[f"Trainer/skipped_invalid_batches_{phase}"] = skipped_invalid_batches
 
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
@@ -791,6 +953,7 @@ class Trainer:
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
         )
         extra_loss_mts = {}
+        skipped_invalid_batches = 0
 
         progress = ProgressMeter(
             iters_per_epoch,
@@ -818,50 +981,53 @@ class Trainer:
             # )  # move tensors in a tensorclass
 
             try:
-                self._run_step(batch, phase, loss_mts, extra_loss_mts)
+                did_backward = self._run_step(batch, phase, loss_mts, extra_loss_mts)
 
-                # compute gradient and do optim step
-                exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
-                self.where = float(exact_epoch) / self.max_epochs
-                assert self.where <= 1 + self.EPSILON
-                if self.where < 1.0:
-                    self.optim.step_schedulers(
-                        self.where, step=int(exact_epoch * iters_per_epoch)
-                    )
+                if did_backward:
+                    # compute gradient and do optim step
+                    exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
+                    self.where = float(exact_epoch) / self.max_epochs
+                    assert self.where <= 1 + self.EPSILON
+                    if self.where < 1.0:
+                        self.optim.step_schedulers(
+                            self.where, step=int(exact_epoch * iters_per_epoch)
+                        )
+                    else:
+                        logging.warning(
+                            f"Skipping scheduler update since the training is at the end, i.e, {self.where} of [0,1]."
+                        )
+
+                    # Log schedulers
+                    if data_iter % self.logging_conf.log_scalar_frequency == 0:
+                        for j, param_group in enumerate(self.optim.optimizer.param_groups):
+                            for option in self.optim.schedulers[j]:
+                                optim_prefix = (
+                                    "" + f"{j}_"
+                                    if len(self.optim.optimizer.param_groups) > 1
+                                    else ""
+                                )
+                                self.logger.log(
+                                    os.path.join("Optim", f"{optim_prefix}", option),
+                                    param_group[option],
+                                    self.steps[phase],
+                                )
+
+                    # Clipping gradients and detecting diverging gradients
+                    if self.gradient_clipper is not None:
+                        self.scaler.unscale_(self.optim.optimizer)
+                        self.gradient_clipper(model=self.model)
+
+                    if self.gradient_logger is not None:
+                        self.gradient_logger(
+                            self.model, rank=self.distributed_rank, where=self.where
+                        )
+
+                    # Optimizer step: the scaler will make sure gradients are not
+                    # applied if the gradients are infinite
+                    self.scaler.step(self.optim.optimizer)
+                    self.scaler.update()
                 else:
-                    logging.warning(
-                        f"Skipping scheduler update since the training is at the end, i.e, {self.where} of [0,1]."
-                    )
-
-                # Log schedulers
-                if data_iter % self.logging_conf.log_scalar_frequency == 0:
-                    for j, param_group in enumerate(self.optim.optimizer.param_groups):
-                        for option in self.optim.schedulers[j]:
-                            optim_prefix = (
-                                "" + f"{j}_"
-                                if len(self.optim.optimizer.param_groups) > 1
-                                else ""
-                            )
-                            self.logger.log(
-                                os.path.join("Optim", f"{optim_prefix}", option),
-                                param_group[option],
-                                self.steps[phase],
-                            )
-
-                # Clipping gradients and detecting diverging gradients
-                if self.gradient_clipper is not None:
-                    self.scaler.unscale_(self.optim.optimizer)
-                    self.gradient_clipper(model=self.model)
-
-                if self.gradient_logger is not None:
-                    self.gradient_logger(
-                        self.model, rank=self.distributed_rank, where=self.where
-                    )
-
-                # Optimizer step: the scaler will make sure gradients are not
-                # applied if the gradients are infinite
-                self.scaler.step(self.optim.optimizer)
-                self.scaler.update()
+                    skipped_invalid_batches += 1
 
                 # measure elapsed time
                 batch_time_meter.update(time.time() - end)
@@ -898,6 +1064,9 @@ class Trainer:
             out_dict[k] = v.avg
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
+        out_dict[f"Trainer/skipped_invalid_batches_{Phase.TRAIN}"] = (
+            skipped_invalid_batches
+        )
         out_dict.update(self._get_trainer_state(phase))
         logging.info("Losses and meters:\n%s", pformat(out_dict, sort_dicts=False))
         self._reset_meters([phase])
@@ -921,7 +1090,7 @@ class Trainer:
         loss_mts: Dict[str, AverageMeter],
         extra_loss_mts: Dict[str, AverageMeter],
         raise_on_error: bool = True,
-    ):
+    ) -> bool:
         """
         Run the forward / backward
         """
@@ -943,6 +1112,7 @@ class Trainer:
             accum_steps = 1
             batch = [batch]
 
+        did_backward = False
         for i, chunked_batch in enumerate(batch):
             ddp_context = (
                 self.model.no_sync()
@@ -960,19 +1130,47 @@ class Trainer:
                         self.model,
                         phase,
                     )
+                skip_step = self._pop_skip_step_flag(
+                    extra_losses, self._SKIP_STEP_EXTRA_LOSS_KEY
+                )
+                if skip_step:
+                    if did_backward and self.distributed_rank == 0:
+                        logging.warning(
+                            "Skipping %s optimizer step: invalid batch detected after "
+                            "partial gradient accumulation; clearing partial grads.",
+                            phase,
+                        )
+                    # If any accumulation chunk is invalid, drop the whole optimizer step.
+                    # This avoids stepping on partially accumulated / unsynchronized grads.
+                    self.optim.zero_grad(set_to_none=True)
+                    return False
 
                 assert len(loss_dict) == 1
                 loss_key, loss = loss_dict.popitem()
 
-                if not math.isfinite(loss.item()):
-                    error_msg = f"Loss is {loss.item()}, attempting to stop training"
-                    logging.error(error_msg)
-                    if raise_on_error:
-                        raise FloatingPointError(error_msg)
-                    else:
-                        return
+                is_loss_finite_local = math.isfinite(loss.item())
+                skip_step = self._sync_skip_flag(not is_loss_finite_local)
+                if skip_step:
+                    if not is_loss_finite_local and self.distributed_rank == 0:
+                        logging.warning(
+                            "Skipping %s step %d due to non-finite `%s` loss (value=%s)",
+                            phase,
+                            max(self.steps[phase] - 1, 0),
+                            loss_key,
+                            loss.item(),
+                        )
+                    elif self.distributed_rank == 0:
+                        logging.warning(
+                            "Skipping %s step %d due to non-finite loss detected on another rank",
+                            phase,
+                            max(self.steps[phase] - 1, 0),
+                        )
+                    # Clear any partial grads from earlier accumulation chunks and skip this step.
+                    self.optim.zero_grad(set_to_none=True)
+                    return False
 
                 self.scaler.scale(loss).backward()
+                did_backward = True
                 loss_mts[loss_key].update(loss.item(), batch_size)
                 for extra_loss_key, extra_loss in extra_losses.items():
                     if extra_loss_key not in extra_loss_mts:
@@ -980,6 +1178,7 @@ class Trainer:
                             extra_loss_key, self.device, ":.2e"
                         )
                     extra_loss_mts[extra_loss_key].update(extra_loss.item(), batch_size)
+        return did_backward
 
     def _log_meters_and_save_best_ckpts(self, phases: List[str]):
         logging.info("Synchronizing meters")
